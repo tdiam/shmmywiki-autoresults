@@ -17,9 +17,6 @@ from match_keywords import match_keywords
 with open("db/keywords.json", "r", encoding="utf8") as f:
 	keywords = json.load(f)
 
-with open("db/courses.json", "r", encoding="utf8") as f:
-	courses = json.load(f)
-
 c = format_text(input("Search: "))
 while(c != ""):
 	res = match_keywords(c)
@@ -49,8 +46,6 @@ while(c != ""):
 	c = format_text(input("Search: "))
 
 shutil.copyfile("db/keywords.json", "db/keywords.json.bak")
-shutil.copyfile("db/courses.json", "db/courses.json.bak")
 
-fout = open("db/keywords.json", "w", encoding="utf8")
-fout.write(json.dumps(keywords))
-fout.close()
+with open("db/keywords.json", "w", encoding="utf8") as fout:
+	fout.write(json.dumps(keywords))

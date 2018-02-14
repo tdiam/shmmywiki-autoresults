@@ -9,8 +9,21 @@ import sys, json, urllib
 # URL from which results will be fetched
 FORUM_URL = "https://shmmy.ntua.gr/forum/viewtopic.php?f=290&t=21986&start="
 
+lastID = "none"
+
+try:
+	with open("outputs/last_result_id.txt", "r") as fp:
+		content = fp.read()
+		if content:
+			lastID = content
+except FileNotFoundError:
+	pass
+
+lastIndex = -1
+curr_lastID = ""
+
 def readPage(url, start = 0):
-	global postList, outputJSON
+	global postList, outputJSON, lastIndex, curr_lastID
 	f = urlopen(url + str(start)).read()
 	html = pq(f)
 	activeEl = html(".action-bar.top .pagination li.active span")
@@ -51,6 +64,10 @@ def readPage(url, start = 0):
 
 		# get source url
 		d["source"] = url + str(start) + "#" + p.attrib["id"]
+		if p.attrib["id"] == lastID:
+			# current len(postList) will be equal to the index of this entry
+			lastIndex = len(postList)
+		curr_lastID = p.attrib["id"]
 
 		# get date
 		date_str = pobj("p.author").html()
@@ -58,7 +75,7 @@ def readPage(url, start = 0):
 		date_str = greekToEngDate(date_str[i:-1])
 		date_obj = datetime.strptime(date_str, "%a %b %d, %Y %I:%M %p")
 		d["date"] = date_obj.strftime("%d/%m/%Y")
-		postList += [d]
+		postList.append(d)
 		if ind != "":
 			outputJSON[ind] = {"source": d["source"], "date": d["date"]}
 	if isLast == True:
@@ -70,5 +87,14 @@ postList = []
 outputJSON = {}
 readPage(FORUM_URL)
 
-with open("outputs/results.json", "w", encoding="utf8") as fout:
-	fout.write(json.dumps(outputJSON))
+newPosts = len(postList) - 1 - lastIndex
+print("{} new posts fetched".format(newPosts))
+
+if lastID != curr_lastID:
+	with open("outputs/results.json", "w", encoding="utf8") as fout:
+		fout.write(json.dumps(outputJSON))
+	with open("outputs/last_result_id.txt", "w") as fp:
+		fp.write(curr_lastID)
+else:
+	# if there are no new posts, abort the rest of the batch sequence
+	exit()

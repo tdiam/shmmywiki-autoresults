@@ -9,3 +9,4 @@ while query != "":
 		print("Sorry, the course was not found in the list")
 	else:
 		print("\n".join(res["titles"]))
+	query = format_text(input("Search: "))

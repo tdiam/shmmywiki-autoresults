@@ -23,5 +23,5 @@ def match_keywords(text):
 	for idx, p in enumerate(points):
 		if p == max_value:
 			res["indexes"].append(idx)
-			res["titles"].append(courses[str(idx)])
+			res["titles"].append(courses[str(idx)]["title"])
 	return res

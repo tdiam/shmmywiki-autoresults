@@ -15,8 +15,9 @@ from numpy import random
 
 SCHEDULE_FILE = "schedule_jan18.pdf"
 FONT_SIZE = 5
-CREATE_SVG = False
-SHOW_TEXTBOXES = False
+CREATE_SVG = True
+SHOW_TEXTBOXES = True
+LOG_TEXTS = True
 
 rects = []
 dates = []
@@ -110,15 +111,115 @@ def mergeLines(lines):
 def getTextCoords(coords):
     return (round(coords[0]), 600 - round(coords[1]) - FONT_SIZE)
 
+# returns a pair containing the sorted horizontal and vertical lines of the grid
+def createGrid(lines):
+    horizontal = []
+    vertical = []
+    for l in lines:
+        if l[0][1] == l[1][1]:
+            horizontal.append(l)
+        if l[0][0] == l[1][0]:
+            vertical.append(l)
+    # sort horizontal lines by y coordinate
+    horizontal.sort(key = lambda x: x[0][1])
+    # sort vertical lines by x coordinate
+    vertical.sort()
+    return (horizontal, vertical)
+
+# returns a boolean value that indicates whether the two points A, B are in the same cell
+def inSameCell(grid, A, B):
+    # if lines do not form a grid, return False
+    if len(grid[0]) < 2 or len(grid[1]) < 2:
+        return False
+
+    # if points are not in the table, return False
+    leftLine, rightLine, topLine, bottomLine = grid[1][0], grid[1][-1], grid[0][0], grid[0][-1]
+    if A[0] <= leftLine[0][0] or A[0] >= rightLine[0][0] or A[1] <= topLine[0][1] or A[1] >= bottomLine[0][1]:
+        return False
+    if B[0] <= leftLine[0][0] or B[0] >= rightLine[0][0] or B[1] <= topLine[0][1] or B[1] >= bottomLine[0][1]:
+        return False
+
+    # check horizontal lines
+    for h in grid[0]:
+        # this condition will catch the first line that will be just below A or B
+        # the line is below both A, B iff A, B are in the same cell
+        # since if they weren't the check would have already occurred
+        # if the line is not below both of them, return False because we already
+        # know the two points cannot be in the same cell
+        if h[0][1] > A[1] or h[0][1] > B[1]:
+            if not(h[0][1] > A[1] and h[0][1] > B[1]):
+                return False
+
+    # check vertical lines
+    for v in grid[1]:
+        if v[0][0] > A[0] or v[0][0] > B[0]:
+            if not(v[0][0] > A[0] and v[0][0] > B[0]):
+                return False
+
+    # if both checks have succeeded
+    return True
+
+# merge texts from textboxes that are in the same cell
+# textboxes array is sorted by left-to-right top-to-bottom order
+# BUG: this will wrongly merge two different courses that may happen to be examined the same time and date
+# temporary workaround uses splitSimultaneousCourses
+def mergeTexts(grid, textboxes):
+    lst = []
+    for t in textboxes:
+        # check if this textbox is in the same cell with any previously inserted ones
+        appended = False
+        for l in lst:
+            if inSameCell(grid, t[0], l[0]):
+                # maintain text order in merged textboxes so that texts with smaller y-coordinates
+                # appear before texts larger y-coordinates
+                # if this textbox is above the inserted one, prepend text and change coordinates
+                if t[0][1] < l[0][1]:
+                    # underscore (_) indicates a new line
+                    l[1] = t[1] + " _ " + l[1]
+                    l[0] = t[0]
+                # else append text and keep coordinates
+                else:
+                    l[1] += " _ " + t[1]
+                appended = True
+                break
+        if not appended:
+            lst.append(t)
+    return lst
+
+def splitSimultaneousCourses(textboxes):
+    bonus = []
+    for t in textboxes:
+        # if two instances of "Ηλ." occur in the text, this means that the cell
+        # contains more than one course
+        if t[1].count("Ηλ.") > 1:
+            rows = t[1].split(" _ ")
+            lst = [rows[0]]
+            for r in rows[1:]:
+                # when "Ηλ." occurs, consider next row as a separate course
+                if "Ηλ." in lst[-1]:
+                    lst.append(r)
+                else:
+                    lst[-1] += " " + r
+            # replace this textbox content with the first part of the splitted courses
+            t[1] = lst[0]
+            # add rest parts to bonus
+            bonus += [[t[0], l, ""] for l in lst[1:]]
+        else:
+            t[1] = t[1].replace(" _ ", " ")
+    # append bonus textboxes and return
+    textboxes += bonus
+    return textboxes
+
 # get y boundaries for each date in the current page
-def calcDateBoundaries(lines):
-    # check only horizontal lines
-    # also, dates should be in the same column, so check only lines with startpoint.x > firstdate.x
-    datelines = [l for l in lines if l[0][1] == l[1][1] and l[0][0] < dates[0]["coords"][0]]
+def calcDateBoundaries(grid):
+    # grid[0] gives the horizontal lines sorted by y coordinate
+    # dates should be in the same column, so check only lines with startpoint.x > firstdate.x
+    datelines = [l for l in grid[0] if l[0][0] < dates[0]["coords"][0]]
     for i in range(len(dates)):
         y1, y2 = 0, 0
         for j in range(len(datelines)):
-            if dates[i]["coords"][1] < datelines[j][0][1]:
+            # this condition will catch the first line that will be just below the date
+            if datelines[j][0][1] > dates[i]["coords"][1]:
                 # datelines[j - 1] will always exist since all dates have a line above them
                 y1 = datelines[j - 1][0][1]
                 y2 = datelines[j][0][1]
@@ -135,10 +236,7 @@ def getDate(coords):
         if coords[1] > d["boundaries"][0] and coords[1] < d["boundaries"][1]:
             return d["date"]
 
-with open("db/courses.json") as f:
-    coursenames = json.load(f)
-
-with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
+with open("pdf/{}".format(SCHEDULE_FILE), "rb") as fp:
     parser = PDFParser(fp)
     document = PDFDocument(parser)
     if not document.is_extractable:
@@ -153,17 +251,12 @@ with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
         for obj in lt_objs:
             if isinstance(obj, LTTextBoxHorizontal):
                 coor = getTextCoords(obj.bbox[0:2])
-                text = obj.get_text().replace('\n', ' _')
-                textboxes.append((coor, text[:5]))
+                text = obj.get_text().replace('\n', ' ')
                 # check if content contains a date
                 match = re.search(r"\d{2}/\d{2}/\d{4}", text)
                 if match:
                     dates.append({"date": match.group(), "coords": coor})
-                res = match_keywords(format_text(text))
-                if len(res["indexes"]) == 1:
-                    courses[res["indexes"][0]] = {"coords": coor}
-                    # may append the same course multiple times
-                    curr_courses.append(res["indexes"][0])
+                textboxes.append([coor, text, ""])
 
             if isinstance(obj, LTRect):
                 rects.append(getRectCoords(obj.bbox[0:4]))
@@ -171,7 +264,11 @@ with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
             if isinstance(obj, LTFigure):
                 parse_obj(obj._objs)
 
-    with open("pdf-parse/dump.html", "w", encoding="utf8") as svg:
+    if LOG_TEXTS:
+        with open("outputs/pdf_texts.txt", "w", encoding="utf8") as log:
+            log.write("")
+
+    with open("outputs/pdf_svg.html", "w", encoding="utf8") as svg:
         ''' SVG HEAD '''
         if CREATE_SVG:
             svg.write("<style type=\"text/css\">svg{stroke:#000;stroke-width:1;fill:none}</style>\n")
@@ -191,7 +288,6 @@ with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
             rects = []
             textboxes = []
             dates = []
-            curr_courses = []
 
             # extract info from this page
             parse_obj(layout._objs)
@@ -201,8 +297,21 @@ with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
             lines = mergeLines(lines)
             lines.sort(key = lambda x: x[1][1])
             lines.sort(key = lambda x: x[0][1])
+
+            grid = createGrid(lines)
+            textboxes = mergeTexts(grid, textboxes)
+            textboxes = splitSimultaneousCourses(textboxes)
+
             if dates:
-                calcDateBoundaries(lines)
+                calcDateBoundaries(grid)
+
+            # keyword matching for each textbox
+            for t in textboxes:
+                t[1] = " ".join(t[1].split())
+                res = match_keywords(format_text(t[1]))
+                if len(res["indexes"]) == 1:
+                    courses[res["indexes"][0]] = {"coords": t[0], "date": getDate(t[0])}
+                    t[2] = " (match: {})".format(res["titles"][0])
 
             ''' DRAW LINES '''
             if CREATE_SVG:
@@ -210,10 +319,11 @@ with open("pdf-parse/{}".format(SCHEDULE_FILE), "rb") as fp:
                     svg.write("<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#{}\"></line>\n".format(l[0][0], l[0][1], l[1][0], l[1][1], randomColor()))
                 if SHOW_TEXTBOXES:
                     for t in textboxes:
-                        svg.write("<text x=\"{}\" y=\"{}\" font-size=\"4\" font-weight=\"lighter\">{}</text>\n".format(t[0][0], t[0][1], t[1]))
-            
-            for c in curr_courses:
-                courses[c]["date"] = getDate(courses[c]["coords"])
+                        svg.write("<text x=\"{}\" y=\"{}\" font-size=\"4\" font-weight=\"lighter\">{}</text>\n".format(t[0][0], t[0][1], t[1][:5]))
+            if LOG_TEXTS:
+                with open("outputs/pdf_texts.txt", "a", encoding="utf8") as log:
+                    for t in textboxes:
+                        log.write("{}, {}, {}{}\n".format(t[0][0], t[0][1], t[1], t[2]))
 
             ''' CLOSE SVG '''
             if CREATE_SVG:
