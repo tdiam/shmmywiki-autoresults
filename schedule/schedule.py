@@ -9,20 +9,19 @@ import pdfminer, pdfminer.layout
 from pdfminer.layout import LAParams, LTTextBox, LTRect, LTLine, LTTextLine, LTFigure, LTTextLineHorizontal, LTTextBoxHorizontal
 from pdfminer.converter import PDFPageAggregator
 import json, time, re
-from match_keywords import match_keywords
+from db import keywords
 from utils import format_text, find_in
 from numpy import random
+from config import cfg
 
-SCHEDULE_FILE = "schedule_jan18.pdf"
 FONT_SIZE = 5
 CREATE_SVG = True
 SHOW_TEXTBOXES = True
+SHOW_DATELINES = True
 LOG_TEXTS = True
 
-rects = []
-dates = []
-textboxes = []
-courses = {}
+# Store all in mutable so that nested functions can change their values
+data = {"rects": [], "dates": [], "datelines": [], "textboxes": [], "hours": [], "courses": {}}
 
 def randomColor():
     de = "{:02x}".format(random.randint(256))
@@ -210,130 +209,196 @@ def splitSimultaneousCourses(textboxes):
     textboxes += bonus
     return textboxes
 
+def calcHourBoundaries(grid):
+    hourlines = [l for l in grid[0]]
+    hours = []
+    for i in range(len(data["hours"])):
+        y1, y2 = 0, 0
+        for j in range(len(hourlines)):
+            # this condition will catch the first line that will be just below the hour
+            if hourlines[j][0][1] > data["hours"][i]["coords"][1]:
+                # hourlines[j - 1] will always exist since all hours have a line above them
+                y1 = hourlines[j - 1][0][1]
+                for offset, h in enumerate(data["hours"][i]["hours"]):
+                    try:
+                        y2 = hourlines[j + offset][0][1]
+                        hours.append({"coords": (data["hours"][i]["coords"][0], y1 + 5), "hour": h, "boundaries": (y1, y2)})
+                        y1 = y2
+                    except:
+                        y2 = hourlines[j][0][1]
+                        hours.append({"coords": (data["hours"][i]["coords"][0], y1 + 5), "hour": h, "boundaries": (y1, y2)})
+                break
+    data["hours"] = hours
+
 # get y boundaries for each date in the current page
 def calcDateBoundaries(grid):
     # grid[0] gives the horizontal lines sorted by y coordinate
     # dates should be in the same column, so check only lines with startpoint.x > firstdate.x
-    datelines = [l for l in grid[0] if l[0][0] < dates[0]["coords"][0]]
-    for i in range(len(dates)):
+    datelines = [l for l in grid[0] if l[0][0] < data["dates"][0]["coords"][0] and l[1][0] > 600]
+    for i in range(len(data["dates"])):
         y1, y2 = 0, 0
         for j in range(len(datelines)):
             # this condition will catch the first line that will be just below the date
-            if datelines[j][0][1] > dates[i]["coords"][1]:
+            if datelines[j][0][1] > data["dates"][i]["coords"][1]:
                 # datelines[j - 1] will always exist since all dates have a line above them
                 y1 = datelines[j - 1][0][1]
                 y2 = datelines[j][0][1]
                 break
-        dates[i]["boundaries"] = (y1, y2)
+        data["dates"][i]["boundaries"] = (y1, y2)
 
 # get date from coordinates
 def getDate(coords):
-    if not dates:
+    if not data["dates"]:
         return "not assigned"
-    for d in dates:
-        if d["boundaries"][0] == 0 and d["boundaries"][1] == 0:
-            return "ERROR"
-        if coords[1] > d["boundaries"][0] and coords[1] < d["boundaries"][1]:
-            return d["date"]
+    lastAbove = None
+    ret = None
+    flag = True
+    for d in data["dates"]:
+        # Will keep flag to True after the loop only if all boundaries have zero length
+        if not(d["boundaries"][0] == 0 and d["boundaries"][1] == 0):
+            flag = False
+            if coords[1] > d["boundaries"][1]:
+                lastAbove = d["date"]
+            if coords[1] > d["boundaries"][0] and coords[1] < d["boundaries"][1]:
+                ret = d["date"]
+    if flag:
+        return "ERROR"
+    elif ret is None:
+        return lastAbove
+    else:
+        return ret
 
-with open("pdf/{}".format(SCHEDULE_FILE), "rb") as fp:
-    parser = PDFParser(fp)
-    document = PDFDocument(parser)
-    if not document.is_extractable:
-        raise PDFTextExtractionNotAllowed
-    rsrcmgr = PDFResourceManager()
-    device = PDFDevice(rsrcmgr)
-    laparams = LAParams()
-    device = PDFPageAggregator(rsrcmgr, laparams=laparams)
-    interpreter = PDFPageInterpreter(rsrcmgr, device)
+def write(j):
+    with open("outputs/" + cfg.get("folder") + "/dates.json", "w", encoding="utf8") as fout:
+        fout.write(json.dumps(j))
 
-    def parse_obj(lt_objs):
-        for obj in lt_objs:
-            if isinstance(obj, LTTextBoxHorizontal):
-                coor = getTextCoords(obj.bbox[0:2])
-                text = obj.get_text().replace('\n', ' ')
-                # check if content contains a date
-                match = re.search(r"\d{2}/\d{2}/\d{4}", text)
-                if match:
-                    dates.append({"date": match.group(), "coords": coor})
-                textboxes.append([coor, text, ""])
+def get():
+    with open("outputs/" + cfg.get("folder") + "/dates.json", "r", encoding="utf8") as f:
+        j = json.load(f)
+    try:
+        with open("outputs/" + cfg.get("folder") + "/dates.manual.json", "r", encoding="utf8") as f:
+            j_manual = json.load(f)
+    except FileNotFoundError:
+        j_manual = {}
+    j.update(j_manual)
+    return {i:j[i] for i in j if len(j[i]) > 0}
 
-            if isinstance(obj, LTRect):
-                rects.append(getRectCoords(obj.bbox[0:4]))
+def parse():
+    with open("schedule/{}".format(cfg.get("schedule_file")), "rb") as fp:
+        parser = PDFParser(fp)
+        document = PDFDocument(parser)
+        if not document.is_extractable:
+            raise PDFTextExtractionNotAllowed
+        rsrcmgr = PDFResourceManager()
+        device = PDFDevice(rsrcmgr)
+        laparams = LAParams()
+        device = PDFPageAggregator(rsrcmgr, laparams=laparams)
+        interpreter = PDFPageInterpreter(rsrcmgr, device)
 
-            if isinstance(obj, LTFigure):
-                parse_obj(obj._objs)
+        def parse_obj(lt_objs):
+            for obj in lt_objs:
+                if isinstance(obj, LTTextBoxHorizontal):
+                    coor = getTextCoords(obj.bbox[0:2])
+                    text = obj.get_text().replace('\n', ' ')
+                    # check if content contains a date
+                    match = re.search(r"\d{2}/\d{2}/\d{4}", text)
+                    if match:
+                        data["dates"].append({"date": match.group(), "coords": coor})
+                    match = re.findall(r"\d{1,2}:\d{2}", text)
+                    if match:
+                        data["hours"].append({"hours": list(map(lambda x: "{0:0>5}".format(x), match)), "coords": coor})
+                    data["textboxes"].append([coor, text, ""])
 
-    if LOG_TEXTS:
-        with open("outputs/pdf_texts.txt", "w", encoding="utf8") as log:
-            log.write("")
+                if isinstance(obj, LTRect):
+                    data["rects"].append(getRectCoords(obj.bbox[0:4]))
 
-    with open("outputs/pdf_svg.html", "w", encoding="utf8") as svg:
-        ''' SVG HEAD '''
-        if CREATE_SVG:
-            svg.write("<style type=\"text/css\">svg{stroke:#000;stroke-width:1;fill:none}</style>\n")
-        i = 0
+                if isinstance(obj, LTFigure):
+                    parse_obj(obj._objs)
 
-        # loop over all pages in the document
-        for page in PDFPage.create_pages(document):
+        if LOG_TEXTS:
+            with open("outputs/" + cfg.get("folder") + "/pdf_texts.txt", "w", encoding="utf8") as log:
+                log.write("")
 
-            # read the page into a layout object
-            interpreter.process_page(page)
-            layout = device.get_result()
-
-            ''' CREATE SVG '''
+        with open("outputs/" + cfg.get("folder") + "/pdf_svg.html", "w", encoding="utf8") as svg:
+            ''' SVG HEAD '''
             if CREATE_SVG:
-                svg.write("<svg id=\"s{}\" width=\"1200\" height=\"600\">\n".format(i))
-            
-            rects = []
-            textboxes = []
-            dates = []
+                svg.write("<style type=\"text/css\">svg{stroke:#000;stroke-width:1;fill:none}</style>\n")
+            i = 0
 
-            # extract info from this page
-            parse_obj(layout._objs)
+            # loop over all pages in the document
+            for page in PDFPage.create_pages(document):
+                # read the page into a layout object
+                interpreter.process_page(page)
+                layout = device.get_result()
 
-            lines = rectsToLines(rects)
+                ''' CREATE SVG '''
+                if CREATE_SVG:
+                    svg.write("<svg id=\"s{}\" width=\"1200\" height=\"600\">\n".format(i))
+                
+                data["rects"] = []
+                data["textboxes"] = []
+                data["dates"] = []
+                data["datelines"] = []
+                data["hours"] = []
 
-            lines = mergeLines(lines)
-            lines.sort(key = lambda x: x[1][1])
-            lines.sort(key = lambda x: x[0][1])
+                # extract info from this page
+                parse_obj(layout._objs)
 
-            grid = createGrid(lines)
-            textboxes = mergeTexts(grid, textboxes)
-            textboxes = splitSimultaneousCourses(textboxes)
+                lines = rectsToLines(data["rects"])
 
-            if dates:
-                calcDateBoundaries(grid)
+                lines = mergeLines(lines)
+                lines.sort(key = lambda x: x[1][1])
+                lines.sort(key = lambda x: x[0][1])
 
-            # keyword matching for each textbox
-            for t in textboxes:
-                t[1] = " ".join(t[1].split())
-                res = match_keywords(format_text(t[1]))
-                if len(res["indexes"]) == 1:
-                    courses[res["indexes"][0]] = {"coords": t[0], "date": getDate(t[0])}
-                    t[2] = " (match: {})".format(res["titles"][0])
+                grid = createGrid(lines)
+                data["textboxes"] = mergeTexts(grid, data["textboxes"])
+                data["textboxes"] = splitSimultaneousCourses(data["textboxes"])
 
-            ''' DRAW LINES '''
-            if CREATE_SVG:
-                for l in lines:
-                    svg.write("<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#{}\"></line>\n".format(l[0][0], l[0][1], l[1][0], l[1][1], randomColor()))
-                if SHOW_TEXTBOXES:
-                    for t in textboxes:
-                        svg.write("<text x=\"{}\" y=\"{}\" font-size=\"4\" font-weight=\"lighter\">{}</text>\n".format(t[0][0], t[0][1], t[1][:5]))
-            if LOG_TEXTS:
-                with open("outputs/pdf_texts.txt", "a", encoding="utf8") as log:
-                    for t in textboxes:
-                        log.write("{}, {}, {}{}\n".format(t[0][0], t[0][1], t[1], t[2]))
+                data["hours"].sort(key=lambda x: x["coords"][1])
 
-            ''' CLOSE SVG '''
-            if CREATE_SVG:
-                svg.write('</svg>' + "\n")
-            i += 1
+                if data["hours"]:
+                    calcHourBoundaries(grid)
+                if data["dates"]:
+                    calcDateBoundaries(grid)
 
-    with open("outputs/dates.json", "w", encoding="utf8") as out:
+                # keyword matching for each textbox
+                for t in data["textboxes"]:
+                    t[1] = " ".join(t[1].split())
+                    res = keywords.match(format_text(t[1]))
+                    if len(res["indexes"]) == 1:
+                        data["courses"][res["indexes"][0]] = {"coords": t[0], "date": getDate(t[0])}
+                        t[2] = " (match: {})".format(res["titles"][0])
+
+                ''' DRAW LINES '''
+                if CREATE_SVG:
+                    minX, maxX = 1e10, 0
+                    for l in lines:
+                        svg.write("<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#{}\"></line>\n".format(l[0][0], l[0][1], l[1][0], l[1][1], randomColor()))
+                        if l[0][0] < minX:
+                            minX = l[0][0]
+                        if l[1][0] > maxX:
+                            maxX = l[1][0]
+                    if SHOW_DATELINES:
+                        for h in data["hours"]:
+                            svg.write("<circle cx=\"{}\" cy=\"{}\" r=\"1\" stroke=\"red\"></circle>\n".format(h["coords"][0], h["coords"][1]))
+                        for d in data["dates"]:
+                            if d["boundaries"][0] != 0 and d["boundaries"][1] != 0:
+                                svg.write("<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#111111\"></line>\n".format(minX, d["boundaries"][0], maxX, d["boundaries"][0]))
+                                svg.write("<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#111111\"></line>\n".format(minX, d["boundaries"][1], maxX, d["boundaries"][1]))
+                    if SHOW_TEXTBOXES:
+                        for t in data["textboxes"]:
+                            svg.write("<text x=\"{}\" y=\"{}\" font-size=\"4\" font-weight=\"lighter\">{}</text>\n".format(t[0][0], t[0][1], t[1][:5]))
+                if LOG_TEXTS:
+                    with open("outputs/" + cfg.get("folder") + "/pdf_texts.txt", "a", encoding="utf8") as log:
+                        for t in data["textboxes"]:
+                            log.write("{}, {}, {}{}\n".format(t[0][0], t[0][1], t[1], t[2]))
+
+                ''' CLOSE SVG '''
+                if CREATE_SVG:
+                    svg.write('</svg>' + "\n")
+                i += 1
+
         coursedates = {}
-        for key, c in courses.items():
+        for key, c in data["courses"].items():
             coursedates[key] = c["date"]
-        out.write(json.dumps(coursedates))
-        out.close()
-
+        write(coursedates)
