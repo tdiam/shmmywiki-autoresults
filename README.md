@@ -53,7 +53,7 @@ The project is organized as follows:
         * `wiki_title`: The title of the shmmywiki article in which the results will be posted.
         * `forum_thread`: The thread to which the results for this exam period are posted by the users.
     * `config.py`: Module for accessing the configuration parameters of an exam period from `config.json`.
-    * `utils.py`: Contains helper text functions for the keyword matching algorithm and the extraction of exam results dates from forum posts.
+    * `utils.py`: Contains helper text functions for the keyword matching algorithm and for the extraction of exam results dates from forum posts.
 * `db/`
     * `keywords.py`
         * `get()`: Returns the keyword dictionary parsed from `keywords.json`, which matches each keyword with a list of course IDs.
@@ -98,7 +98,7 @@ The project is organized as follows:
 
 ### Usage
 
-When starting a project for a new exam period:
+To add a new exam period:
 1. Include target schedule PDF in the `schedule/` folder.
 1. Add a configuration entry in `config.json` with a unique key as the `config id` and the fields of `folder`, `schedule_file`, `wiki_title`, `forum_thread` as described above.
 
